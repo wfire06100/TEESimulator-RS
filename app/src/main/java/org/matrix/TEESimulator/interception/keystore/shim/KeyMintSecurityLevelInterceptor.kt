@@ -1793,6 +1793,14 @@ private fun KeyMintAttestation.toAuthorizations(
     this.padding.forEach {
         authList.add(createAuth(Tag.PADDING, KeyParameterValue.paddingMode(it)))
     }
+    this.rsaOaepMgfDigest.distinct().forEach {
+        authList.add(
+            createAuth(
+                Tag.RSA_OAEP_MGF_DIGEST,
+                KeyParameterValue.digest(it),
+            )
+        )
+    }
     if (this.rsaPublicExponent != null) {
         authList.add(
             createAuth(
