@@ -2,6 +2,7 @@ package org.matrix.TEESimulator.interception.keystore.shim
 
 import android.hardware.security.keymint.Algorithm
 import android.hardware.security.keymint.BlockMode
+import android.hardware.security.keymint.Digest
 import android.hardware.security.keymint.KeyParameter
 import android.hardware.security.keymint.KeyPurpose
 import android.hardware.security.keymint.PaddingMode
@@ -9,6 +10,16 @@ import android.hardware.security.keymint.Tag
 import org.matrix.TEESimulator.attestation.KeyMintAttestation
 
 object AuthorizeCreate {
+
+    private const val INCOMPATIBLE_MGF_DIGEST = -78
+    private const val UNSUPPORTED_MGF_DIGEST = -79
+    private val supportedMgfDigests = setOf(
+        Digest.SHA1,
+        Digest.SHA_2_224,
+        Digest.SHA_2_256,
+        Digest.SHA_2_384,
+        Digest.SHA_2_512,
+    )
 
     fun check(
         keyParams: KeyMintAttestation?,
@@ -57,8 +68,18 @@ object AuthorizeCreate {
         if (opParams.digest.any { it !in keyParams.digest }) {
             return KeystoreErrorCodes.incompatibleDigest
         }
-        if (opParams.rsaOaepMgfDigest.any { it !in keyParams.rsaOaepMgfDigest }) {
-            return KeystoreErrorCodes.incompatibleDigest
+        val isRsaOaep = keyParams.algorithm == Algorithm.RSA &&
+            (opParams.padding.firstOrNull() ?: keyParams.padding.firstOrNull()) == PaddingMode.RSA_OAEP
+        val requestedMgfDigests =
+            if (isRsaOaep) opParams.rsaOaepMgfDigest.ifEmpty { listOf(Digest.SHA1) }
+            else opParams.rsaOaepMgfDigest
+        if (requestedMgfDigests.any { it !in supportedMgfDigests }) {
+            return UNSUPPORTED_MGF_DIGEST
+        }
+        // A key with no explicit MGF authorization uses the legacy SHA-1 default.
+        val authorizedMgfDigests = keyParams.rsaOaepMgfDigest.ifEmpty { listOf(Digest.SHA1) }
+        if (requestedMgfDigests.any { it !in authorizedMgfDigests }) {
+            return INCOMPATIBLE_MGF_DIGEST
         }
 
         if (keyParams.algorithm == Algorithm.AES && opParams.blockMode.contains(BlockMode.GCM)) {
