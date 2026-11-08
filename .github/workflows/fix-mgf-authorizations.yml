@@ -1,0 +1,40 @@
+name: Fix MGF authorizations
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/fix-mgf-authorizations.yml']
+permissions:
+  contents: write
+  actions: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Apply targeted source correction
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('app/src/main/java/org/matrix/TEESimulator/interception/keystore/shim/KeyMintSecurityLevelInterceptor.kt')
+          s = p.read_text()
+          marker = '    this.padding.forEach {\n        authList.add(createAuth(Tag.PADDING, KeyParameterValue.paddingMode(it)))\n    }\n'
+          addition = '    this.rsaOaepMgfDigest.distinct().forEach {\n        authList.add(\n            createAuth(\n                Tag.RSA_OAEP_MGF_DIGEST,\n                KeyParameterValue.digest(it),\n            )\n        )\n    }\n'
+          assert s.count(marker) == 1, 'Expected source block not found uniquely'
+          if marker + addition not in s:
+              p.write_text(s.replace(marker, marker + addition, 1))
+      - name: Commit correction
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/src/main/java/org/matrix/TEESimulator/interception/keystore/shim/KeyMintSecurityLevelInterceptor.kt
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix: preserve RSA OAEP MGF digest authorizations'
+            git push origin HEAD:main
+          fi
+      - name: Trigger existing build and release workflow
+        run: gh workflow run build.yml --ref main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
