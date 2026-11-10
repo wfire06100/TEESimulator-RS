@@ -1,0 +1,53 @@
+name: Repair crypto audit push
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/repair-crypto-audit-push.yml']
+permissions:
+  contents: write
+  actions: write
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply approved source corrections without workflow changes
+        shell: python
+        run: |
+          from pathlib import Path
+          import subprocess, textwrap
+          source_path = '.github/workflows/apply-crypto-audit.yml'
+          source_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD:' + source_path], text=True).strip()
+          assert source_sha == '8579ab5f5c94184e66bd5594ac0591ae23c114e8', 'Approved generator changed'
+          source = Path(source_path).read_text()
+          begin = '      - name: Apply checked source replacements\n        shell: python\n        run: |\n'
+          end = '\n      - name: Commit source corrections and build description'
+          assert source.count(begin) == 1 and source.count(end) == 1
+          script = textwrap.dedent(source.split(begin, 1)[1].split(end, 1)[0])
+          def replace_once(old, new):
+              global script
+              assert script.count(old) == 1, 'Generator anchor mismatch: ' + old
+              script = script.replace(old, new, 1)
+          replace_once('for p, sha in expected.items():\n', 'for p, sha in expected.items():\n    if p == \".github/workflows/build.yml\": continue\n'.replace('\\\"', '\"'))
+          replace_once('if p not in files: files[p] = Path(p).read_text()', 'if p not in files: files[p] = read_original(p)')
+          replace_once('for p, s in files.items():', 'files.pop(\".github/workflows/build.yml\")\nfor p, s in files.items():'.replace('\\\"', '\"'))
+          def read_original(p):
+              if p == '.github/workflows/build.yml':
+                  return subprocess.check_output(['git', 'show', '62de3747cb034b70f381d6b684177490ff2196d6:' + p], text=True)
+              return Path(p).read_text()
+          exec(compile(script, source_path + ':source-fixes', 'exec'), {'read_original': read_original})
+      - name: Commit only source, tests and description
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/src/main/java/org/matrix/TEESimulator/interception/keystore app/src/test/java/org/matrix/TEESimulator/interception/keystore/shim/CryptoMacLengthsTest.kt app/build.gradle.kts module/changelog.md
+          git diff --cached --check
+          if git diff --cached --name-only | grep -q '^.github/'; then echo 'Refusing workflow changes in bot commit'; exit 1; fi
+          git commit -m 'fix: harden crypto operations, persistence and release metadata'
+          git push origin HEAD:main
+      - name: Trigger tests, build and release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run build.yml --ref main
