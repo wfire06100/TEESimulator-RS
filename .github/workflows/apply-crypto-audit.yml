@@ -1,0 +1,235 @@
+name: Apply crypto audit corrections
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/apply-crypto-audit.yml']
+permissions:
+  contents: write
+  actions: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Cancel premature build of the patch installer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run list --workflow build.yml --commit "$GITHUB_SHA" --json databaseId,status --jq '.[] | select(.status != "completed") | .databaseId' | while read -r id; do gh run cancel "$id" || true; done
+      - name: Apply checked source replacements
+        shell: python
+        run: |
+          from pathlib import Path
+          import re, subprocess
+          base = 'app/src/main/java/org/matrix/TEESimulator/'
+          shim = base + 'interception/keystore/shim/'
+          expected = {
+              shim + 'SoftwareOperation.kt': '564d7cae423f04fd3d0ddba98ab5b88430a7bdcd',
+              shim + 'AuthorizeCreate.kt': '9c7261b56e6fde9300dad61166720c7e8713fee5',
+              shim + 'KeyMintSecurityLevelInterceptor.kt': 'e0cc98260605b53374dd8317b6103ccb65d4b06f',
+              shim + 'GeneratedKeyPersistence.kt': '181cc6ab89ba47c368e3b7a230882b09cf2d5a6b',
+              'app/build.gradle.kts': '03627a714fd17c2b5e049455badc2d109d8aad5a',
+              '.github/workflows/build.yml': '96a41fa85cf9bda1d4d3ce055385623096e5618f',
+          }
+          for p, sha in expected.items():
+              actual = subprocess.check_output(['git', 'rev-parse', 'HEAD:' + p], text=True).strip()
+              assert actual == sha, 'Source changed; refusing to overwrite: ' + p
+          files = {}
+          def get(p):
+              if p not in files: files[p] = Path(p).read_text()
+              return files[p]
+          def sub(p, old, new, count=1):
+              s = get(p)
+              assert s.count(old) == count, 'Unexpected source anchor: ' + p + ': ' + old[:70]
+              files[p] = s.replace(old, new)
+          def region(p, start, end, new):
+              s = get(p)
+              assert s.count(start) == 1 and s.count(end) == 1, 'Ambiguous region: ' + p
+              a, b = s.index(start), s.index(end)
+              assert b > a
+              files[p] = s[:a] + new + s[b:]
+          op = shim + 'SoftwareOperation.kt'
+          auth = shim + 'AuthorizeCreate.kt'
+          km = shim + 'KeyMintSecurityLevelInterceptor.kt'
+          persist = shim + 'GeneratedKeyPersistence.kt'
+          sub(km, 'keyParams.rsaOaepMgfDigest\n                                },', 'listOf(Digest.SHA1)\n                                },')
+          sub(op, '} ?: mainDigest', '} ?: "SHA-1"')
+          sub(op, 'Digest.SHA_2_256 -> "SHA256"', 'Digest.NONE -> "NONE"\n                Digest.SHA1 -> "SHA1"\n                Digest.SHA_2_224 -> "SHA224"\n                Digest.SHA_2_256 -> "SHA256"')
+          sub(op, 'else -> "NONE"', 'else -> throw ServiceSpecificException(KeystoreErrorCodes.incompatibleDigest)')
+          sub(op, 'else -> "SHA-256"', 'else -> throw ServiceSpecificException(KeystoreErrorCodes.incompatibleDigest)')
+          sub(op, 'Digest.SHA_2_256 -> "HmacSHA256"', 'Digest.SHA1 -> "HmacSHA1"\n            Digest.SHA_2_224 -> "HmacSHA224"\n            Digest.SHA_2_256 -> "HmacSHA256"')
+          sub(op, 'else -> "HmacSHA256"', 'else -> throw ServiceSpecificException(KeystoreErrorCodes.incompatibleDigest)')
+          sub(op, 'val tagBytes = (params.macLength ?: (full.size * 8)) / 8\n        val tag = full.copyOf(tagBytes)', '''val bits = params.macLength ?: (full.size * 8)
+                  if (!CryptoMacLengths.valid(bits, params.minMacLength ?: 64, full.size * 8)) {
+                      throw ServiceSpecificException(KeystoreErrorCodes.invalidMacLength)
+                  }
+                  val tag = full.copyOf(bits / 8)''')
+          sub(op, '''if (nonce != null && isAead) {
+                          init(opMode, cryptoKey, javax.crypto.spec.GCMParameterSpec(128, nonce))''', '''if (isAead) {
+                          val bits = params.macLength ?: throw ServiceSpecificException(-53)
+                          if (!CryptoMacLengths.valid(bits, maxOf(96, params.minMacLength ?: 96), 128)) {
+                              throw ServiceSpecificException(KeystoreErrorCodes.invalidMacLength)
+                          }
+                          val iv = nonce ?: if (opMode == Cipher.ENCRYPT_MODE) {
+                              ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
+                          } else throw ServiceSpecificException(-51)
+                          if (iv.size != 12) throw ServiceSpecificException(-52)
+                          init(opMode, cryptoKey, javax.crypto.spec.GCMParameterSpec(bits, iv))''')
+          region(auth, '        if (keyParams.algorithm == Algorithm.AES && opParams.blockMode.contains(BlockMode.GCM)) {', '        if (\n            keyParams.algorithm == Algorithm.RSA &&', '''        if (keyParams.algorithm == Algorithm.AES &&
+                      (opParams.blockMode.firstOrNull() ?: keyParams.blockMode.firstOrNull()) == BlockMode.GCM) {
+                      val bits = opParams.macLength ?: return -53
+                      if (!CryptoMacLengths.valid(bits, maxOf(96, keyParams.minMacLength ?: 96), 128)) {
+                          return KeystoreErrorCodes.invalidMacLength
+                      }
+                  }
+
+          ''')
+          sub(op, '    var onFinishCallback: (() -> Unit)? = null', '    var onFinishCallback: (() -> Unit)? = null\n    internal var finishGuard: ((() -> ByteArray?) -> ByteArray?)? = null')
+          sub(op, '            val result = primitive.finish(data, signature)', '            val action = { primitive.finish(data, signature) }\n            val guard = finishGuard\n            val result = if (guard == null) action() else guard(action)')
+          sub(op, '''        checkInputLength(data)
+                  try {
+                      val startNs''', '''        try {
+                      checkInputLength(data)
+                      val startNs''')
+          sub(op, '''            throw mapToServiceSpecificException(e)
+                  }
+              }
+
+              fun abort()''', '''            throw mapToServiceSpecificException(e)
+                  } finally {
+                      finalized = true
+                  }
+              }
+
+              @Synchronized
+              fun abort()''')
+          for name in ['updateAad(aadInput: ByteArray?)', 'update(data: ByteArray?): ByteArray?', 'finish(data: ByteArray?, signature: ByteArray?): ByteArray?']:
+              marker = '    fun ' + name + ' {\n'
+              s = get(op)
+              candidates = [m.start() for m in re.finditer(re.escape(marker), s) if s[m.end():].startswith(('        SystemLogger.', '        checkActive()'))]
+              assert len(candidates) == 1, 'Ambiguous operation method: ' + name
+              i = candidates[0]
+              files[op] = s[:i] + '    @Synchronized\n' + s[i:]
+          sub(op, '            is javax.crypto.BadPaddingException ->', '            is javax.crypto.AEADBadTagException ->\n                ServiceSpecificException(KeystoreErrorCodes.verificationFailed, e.message)\n            is javax.crypto.BadPaddingException ->')
+          for field, old, new in [('INVALID_TAG', -76, -40), ('INCOMPATIBLE_PURPOSE', -13, -3), ('UNSUPPORTED_PURPOSE', -14, -2), ('INCOMPATIBLE_ALGORITHM', -18, -5), ('KEY_NOT_YET_VALID', -39, -24), ('KEY_EXPIRED', -40, -25)]:
+              sub(op, '"' + field + '", ' + str(old) + ')', '"' + field + '", ' + str(new) + ')')
+          sub(op, '"INCOMPATIBLE_KEY", -31)', '"INVALID_KEY_BLOB", -33)')
+          sub(km, 'usageCounters.getOrPut(resolvedKeyId)', 'usageCounters.computeIfAbsent(resolvedKeyId)')
+          region(km, '                    softwareOperation.onFinishCallback = {', '\n                val maxOps =', '''                    softwareOperation.finishGuard = { action ->
+                                  synchronized(remaining) {
+                                      if (remaining.get() <= 0) {
+                                          throw android.os.ServiceSpecificException(RESPONSE_KEY_NOT_FOUND)
+                                      }
+                                      val result = action()
+                                      remaining.decrementAndGet()
+                                      // Keep the exhausted budget attached until the next create/delete.
+                                      // Never let an old operation delete a replacement key at this alias.
+                                      result
+                                  }
+                              }
+                          }
+          ''')
+          s = get(km)
+          s, n = re.subn(r'(KEYMINT_TOO_MANY_OPERATIONS\s*=\s*)-29\b', r'\g<1>-31', s)
+          assert n == 1, 'Unexpected operation error constant'
+          files[km] = s
+          utils = base + 'interception/keystore/InterceptorUtils.kt'
+          s = get(utils)
+          s = s.replace('-6 -> "Error::Km(INCOMPATIBLE_PURPOSE)"', '-3 -> "Error::Km(INCOMPATIBLE_PURPOSE)"').replace('-7 -> "Error::Km(INCOMPATIBLE_ALGORITHM)"', '-5 -> "Error::Km(INCOMPATIBLE_ALGORITHM)"').replace('-29 -> "Error::Km(TOO_MANY_OPERATIONS)"', '-31 -> "Error::Km(TOO_MANY_OPERATIONS)"').replace('-49 -> "Error::Km(UNSUPPORTED_TAG)"', '-39 -> "Error::Km(UNSUPPORTED_TAG)"').replace('-75 -> "Error::Km(INVALID_INPUT_LENGTH)"', '-21 -> "Error::Km(INVALID_INPUT_LENGTH)"').replace('-76 -> "Error::Km(INVALID_TAG)"', '-40 -> "Error::Km(INVALID_TAG)"')
+          files[utils] = s
+          for name in ['save(', 'delete(keyId:', 'deleteAll()', 'loadAll(securityLevel:', 'rePersistIfNeeded(']:
+              sub(persist, '    fun ' + name, '    @Synchronized\n    fun ' + name)
+          sub(persist, '                    PERSISTENCE_DIR.mkdirs()', '''                    check(PERSISTENCE_DIR.isDirectory || PERSISTENCE_DIR.mkdirs())
+                              android.system.Os.chmod(PERSISTENCE_DIR.absolutePath, 448)''')
+          sub(persist, '                    if (!tmpFile.renameTo(finalFile)) {', '''                    android.system.Os.chmod(tmpFile.absolutePath, 384)
+                              FileOutputStream(tmpFile, true).use { it.fd.sync() }
+                              if (!tmpFile.renameTo(finalFile)) {''')
+          for msg in ['Failed to persist key $keyId', 'Failed to delete persisted key $keyId', 'Failed to delete all persisted keys']:
+              sub(persist, 'SystemLogger.error("' + msg + '", e) }', 'SystemLogger.error("' + msg + '", e); throw e }')
+          sub(persist, 'SystemLogger.warning("Failed to delete persisted key file: ${file.name}")', 'throw IOException("Failed to delete persisted key file: ${file.name}")')
+          sub(persist, '                        if (file.delete()) count++', '                        if (file.delete()) count++ else throw IOException("Failed to delete ${file.name}")')
+          s = get(km)
+          s, n = re.subn(r'persistExecutor\.execute \{(\s+GeneratedKeyPersistence\.save\()', r'run {\1', s)
+          assert n >= 1, 'Persistence call sites not found'
+          files[km] = s
+          policy = shim + 'CryptoMacLengths.kt'
+          assert not Path(policy).exists()
+          files[policy] = '''package org.matrix.TEESimulator.interception.keystore.shim
+
+          internal object CryptoMacLengths {
+              fun valid(bits: Int, minimum: Int, maximum: Int): Boolean =
+                  bits > 0 && bits % 8 == 0 && bits >= minimum && bits <= maximum
+          }
+          '''
+          test = 'app/src/test/java/org/matrix/TEESimulator/interception/keystore/shim/CryptoMacLengthsTest.kt'
+          assert not Path(test).exists()
+          files[test] = '''package org.matrix.TEESimulator.interception.keystore.shim
+
+          import org.junit.Assert.assertFalse
+          import org.junit.Assert.assertTrue
+          import org.junit.Test
+
+          class CryptoMacLengthsTest {
+              @Test fun rejectsInvalidMacLengths() {
+                  for (bits in listOf(-8, 0, 1, 63, 65, 257, 264)) {
+                      assertFalse(CryptoMacLengths.valid(bits, 64, 256))
+                  }
+                  assertTrue(CryptoMacLengths.valid(64, 64, 256))
+                  assertTrue(CryptoMacLengths.valid(256, 64, 256))
+              }
+              @Test fun validatesGcmTags() {
+                  for (bits in listOf(96, 104, 112, 120, 128)) {
+                      assertTrue(CryptoMacLengths.valid(bits, 96, 128))
+                  }
+                  for (bits in listOf(0, 64, 95, 97, 136)) {
+                      assertFalse(CryptoMacLengths.valid(bits, 96, 128))
+                  }
+              }
+          }
+          '''
+          gradle = 'app/build.gradle.kts'
+          sub(gradle, 'https://github.com/Enginex0/TEESimulator-RS/releases/', 'https://github.com/wfire06100/TEESimulator-RS/releases/')
+          sub(gradle, 'https://raw.githubusercontent.com/Enginex0/TEESimulator-RS/main/module/changelog.md', 'https://raw.githubusercontent.com/wfire06100/TEESimulator-RS/main/module/changelog.md')
+          sub(gradle, '            "arm64-v8a",\n            "-o",', '            "arm64-v8a",\n            "-t",\n            "armeabi-v7a",\n            "-t",\n            "x86",\n            "-t",\n            "x86_64",\n            "-o",')
+          build = '.github/workflows/build.yml'
+          sub(build, './gradlew zipRelease zipDebug ', './gradlew :app:testDebugUnitTest zipRelease zipDebug ')
+          sub(build, '''awk "/^## TEESimulator-RS v${ver%%-*}/{flag=1; next} /^## TEESimulator-RS v/{if(flag) exit} flag"''', '''awk '/^## TEESimulator-RS v/{if(flag) exit; flag=1; next} flag' ''')
+          sub(build, 'jq --arg version "$VER" --argjson count "$COUNT" --arg url "$ZIP_URL"', 'jq --arg version "$VER" --argjson count "$COUNT" --arg url "$ZIP_URL" --arg changelog "https://raw.githubusercontent.com/${{ github.repository }}/main/module/changelog.md"')
+          sub(build, '.versionCode = $count | .zipUrl = $url', '.versionCode = $count | .zipUrl = $url | .changelog = $changelog')
+          notes = '''## TEESimulator-RS v6.0.1 - Crypto audit corrections
+
+          - OAEP: use SHA-1 for omitted MGF1 selection consistently with authorization.
+          - GCM: validate and apply the requested tag length and nonce length.
+          - HMAC: reject empty, non-byte-aligned, undersized and oversized MAC requests.
+          - Signatures: map SHA-1/SHA-224 explicitly; reject unsupported digest substitutions.
+          - Operations: invalidate failed finalizations, serialize software methods, enforce shared usage budgets at finalization.
+          - Errors: correct KeyMint fallback values and distinguish GCM authentication failures.
+          - Persistence: serialize reads/writes/deletions, synchronize file data before rename, restrict new key files to owner access, propagate failures and save synchronously.
+          - Packaging: point updates/changelog at this fork, build Rust for all four advertised ABIs, run JVM tests before packaging, extract only the latest changelog section.
+
+          Validation: this change adds MAC-length unit tests and runs JVM tests in CI. Compilation results must be checked in Actions. Android integration, concurrency, reboot durability and provider-specific behavior remain to be validated on devices. The storage remains software-backed; owner-only file permissions are not hardware isolation or encrypted key wrapping. An exhausted key budget remains attached to the key until its next operation request or deletion. No claim is made about removing Chunqiu detection.
+
+          ---
+
+          '''
+          changelog = 'module/changelog.md'
+          s = get(changelog)
+          i = s.index('## TEESimulator-RS v')
+          files[changelog] = s[:i] + notes + s[i:]
+          for p, s in files.items():
+              Path(p).parent.mkdir(parents=True, exist_ok=True)
+              Path(p).write_text(s)
+      - name: Commit source corrections and build description
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/src/main/java/org/matrix/TEESimulator/interception/keystore app/src/test/java/org/matrix/TEESimulator/interception/keystore/shim/CryptoMacLengthsTest.kt app/build.gradle.kts .github/workflows/build.yml module/changelog.md
+          git diff --cached --check
+          git commit -m 'fix: harden crypto operations, persistence and release metadata'
+          git push origin HEAD:main
+      - name: Trigger build, tests and release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run build.yml --ref main
