@@ -1,0 +1,201 @@
+name: Consolidate five reviewed PRs
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/consolidate-five-prs.yml']
+permissions:
+  contents: write
+  actions: write
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Apply pinned reviewed changes without replacing audit or version metadata
+        shell: python
+        run: |
+          from pathlib import Path
+          import subprocess, re, textwrap
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True)
+          assert git('rev-parse', 'HEAD^').strip() == '1911f32a9a6637d45441574eeeaeace640079a98', 'Main changed; review again'
+          subprocess.run(['git', 'config', 'user.name', 'github-actions[bot]'], check=True)
+          subprocess.run(['git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com'], check=True)
+          base = '6d241e56d6e8146cd67ed4ac3dadc9c632969549'
+          subprocess.run(['git', 'fetch', '--no-tags', 'https://github.com/Enginex0/TEESimulator-RS.git', base], check=True)
+          changes = [
+              ('https://github.com/fishing-agents/TEESimulator-RS.git', '92ab11146841e422d7092f377d7c464f86cbdbee', [
+                  'app/src/main/java/org/matrix/TEESimulator/attestation/KeyMintAttestation.kt',
+                  'app/src/main/java/org/matrix/TEESimulator/interception/keystore/shim/KeyMintSecurityLevelInterceptor.kt',
+                  'app/src/main/java/org/matrix/TEESimulator/util/AndroidDeviceUtils.kt',
+                  'stub/src/main/java/android/hardware/security/keymint/Algorithm.java',
+                  'stub/src/main/java/android/hardware/security/keymint/Tag.java',
+                  'stub/src/main/java/android/hardware/security/keymint/KeyParameterValue.java']),
+              ('https://github.com/sewnie/TEESimulator-RS.git', 'a001e5e5b456fd01d08853fb583177ae2952ffc7', [
+                  'app/src/main/java/org/matrix/TEESimulator/interception/keystore/shim/KeyMintSecurityLevelInterceptor.kt']),
+          ]
+          for remote, sha, paths in changes:
+              subprocess.run(['git', 'fetch', '--no-tags', remote, sha], check=True)
+              patch = git('diff', '--full-index', base, sha, '--', *paths)
+              if sha.startswith('92ab111'):
+                  chunks = re.split(r'(?=^diff --git )', patch, flags=re.M)
+                  for i, chunk in enumerate(chunks):
+                      if 'diff --git a/app/src/main/java/org/matrix/TEESimulator/util/AndroidDeviceUtils.kt ' not in chunk:
+                          continue
+                      parts = re.split(r'(?=^@@ )', chunk, flags=re.M)
+                      chunks[i] = parts[0] + ''.join(h for h in parts[1:] if '+            SDK_37 to 170000,' not in h)
+                  patch = ''.join(chunks)
+              assert patch.strip(), 'Empty reviewed patch'
+              subprocess.run(['git', 'apply', '--3way', '--index', '-'], input=patch, text=True, check=True)
+          subprocess.run(['git', 'reset'], check=True)
+          root = Path('app/src/main/java/org/matrix/TEESimulator')
+          def edit(path, old, new):
+              p = Path(path)
+              s = p.read_text()
+              assert s.count(old) == 1, 'Anchor changed: ' + old
+              p.write_text(s.replace(old, new, 1))
+          edit(root / 'util/AndroidDeviceUtils.kt', '?: (Build.VERSION.SDK_INT - 20) * 10000', '?: 160000 // Unknown SDK: preserve the existing fallback; do not extrapolate.')
+          p = root / 'interception/keystore/Keystore2MaintenanceInterceptor.kt'
+          edit(p, 'CLEAR_NAMESPACE_TRANSACTION -> handleClearNamespace(data)', 'CLEAR_NAMESPACE_TRANSACTION -> return TransactionResult.Continue')
+          post = textwrap.dedent('''\
+              override fun onPostTransact(
+                  txId: Long,
+                  target: IBinder,
+                  code: Int,
+                  flags: Int,
+                  callingUid: Int,
+                  callingPid: Int,
+                  data: Parcel,
+                  reply: Parcel?,
+                  resultCode: Int,
+              ): TransactionResult {
+                  if (code != CLEAR_NAMESPACE_TRANSACTION || resultCode != 0 || reply == null) {
+                      return TransactionResult.SkipTransaction
+                  }
+                  val position = reply.dataPosition()
+                  try {
+                      if (!InterceptorUtils.hasException(reply)) handleClearNamespace(data)
+                  } finally {
+                      reply.setDataPosition(position)
+                  }
+                  return TransactionResult.SkipTransaction
+              }
+              
+              ''')
+          anchor = '    private fun handleClearNamespace(data: Parcel) {'
+          edit(p, anchor, textwrap.indent(post, '    ') + anchor)
+          edit(p, 'if (domain == Domain.APP) {', 'if (domain == Domain.APP && nspace >= 0 && nspace <= Int.MAX_VALUE.toLong()) {')
+          edit(p, ' * This is a pure side-effect hook:', ' * clearNamespace is mirrored only after the real call succeeds. Other maintenance\n * operations retain their existing pre-call behavior. This is a side-effect hook:')
+          edit(root / 'interception/keystore/InterceptorUtils.kt', '-3 -> "Error::Km(UNSUPPORTED_KEY_SIZE)"', '-6 -> "Error::Km(UNSUPPORTED_KEY_SIZE)"')
+          mapper = (root / 'interception/keystore/shim/SoftwareOperation.kt').read_text()
+          interceptor = (root / 'interception/keystore/shim/KeyMintSecurityLevelInterceptor.kt').read_text()
+          cpp = Path('app/src/main/cpp/binder_interceptor.cpp').read_text()
+          gradle = Path('app/build.gradle.kts').read_text()
+          assert '"/libcore_bundle.so"' in cpp and 'kBinderLibNames' in cpp
+          assert 'if (algorithm == Algorithm.RSA)' in mapper and 'CryptoMacLengths.valid' in mapper
+          assert 'finishGuard' in interceptor and 'usageCounters.computeIfAbsent' in interceptor
+          assert 'listOf(Digest.SHA1)' in interceptor
+          assert 'persistExecutor.execute {' not in interceptor
+          assert '(generatedKeys.keys + teeResponses.keys + patchedChains.keys)' in interceptor
+          assert '"v6.0.1"' in gradle and '"armeabi-v7a"' in gradle and '"x86_64"' in gradle
+          assert 'unixTextFiles.forEach' in gradle and 'github.com/wfire06100/' in gradle
+          boot = (root / 'config/BootStateManager.kt').read_text()
+          for alias in ('ro.boot.secureboot', 'ro.secureboot.devicelock', 'ro.secureboot.lockstate'):
+              assert alias in boot
+          test = Path('app/src/test/java/org/matrix/TEESimulator/util/VintfInstanceTest.kt')
+          assert not test.exists()
+          test.parent.mkdir(parents=True, exist_ok=True)
+          test.write_text(textwrap.dedent('''\
+              package org.matrix.TEESimulator.util
+              
+              import java.io.File
+              import org.junit.Assert.assertEquals
+              import org.junit.Assert.assertTrue
+              import org.junit.Test
+              
+              class VintfInstanceTest {
+                  private fun versions(xml: String, level: Int): List<Int> {
+                      val file = File.createTempFile("vintf-test-", ".xml")
+                      try {
+                          file.writeText(xml)
+                          val method = AndroidDeviceUtils::class.java.getDeclaredMethod(
+                              "parseKeyMintVersions", File::class.java, Int::class.javaPrimitiveType)
+                          method.isAccessible = true
+                          val entries = method.invoke(AndroidDeviceUtils, file, level) as List<*>
+                          return entries.map {
+                              val entry = requireNotNull(it)
+                              val field = entry.javaClass.getDeclaredField("attestationVersion")
+                              field.isAccessible = true
+                              field.getInt(entry)
+                          }
+                      } finally {
+                          file.delete()
+                      }
+                  }
+                  private val tee = "<hal format='aidl'><name>android.hardware.security.keymint</name><version>5</version><fqname>IKeyMintDevice/default</fqname></hal>"
+                  private val strongbox = "<hal format='aidl'><name>android.hardware.security.keymint</name><version>2</version><fqname>IKeyMintDevice/strongbox</fqname></hal>"
+                  @Test fun `TEE and StrongBox resolve independently`() {
+                      val xml = "<manifest>$tee$strongbox</manifest>"
+                      assertEquals(listOf(500), versions(xml, 1))
+                      assertEquals(listOf(200), versions(xml, 2))
+                  }
+                  @Test fun `absent StrongBox does not inherit TEE declaration`() {
+                      assertTrue(versions("<manifest>$tee</manifest>", 2).isEmpty())
+                  }
+              }
+              '''))
+          notes = '\n'.join([
+              '## TEESimulator-RS v6.0.1 - Five-PR consolidation', '',
+              '- Already present and retained: #68 libcore_bundle.so Binder lookup, #63 RSA/ECB mapping, #47 existing vendor secure-boot aliases and LF script packaging.',
+              '- Integrates pinned #73: Android 17/KeyMint v5 mapping, separate TEE/StrongBox VINTF instances, APEX manifests, ML-DSA parameter tolerance and hardware forwarding of unsupported algorithms/curves. Retains the existing SDK-37 OS mapping and v6.0.1 version scheme; omits speculative future-SDK arithmetic.',
+              '- Integrates pinned #77: clearNamespace purges generated-key, TEE-response and patched-chain caches for the UID. Local adaptation defers clearNamespace cleanup until the real call succeeds and validates the APP namespace range.',
+              '- Retains the crypto/persistence audit and four-ABI fork-local packaging. Corrects residual UNSUPPORTED_KEY_SIZE message mapping to -6; INCOMPATIBLE_PURPOSE remains -3.',
+              '- Adds VINTF instance-isolation JVM tests. Baseline RSA, MAC-length and boot-alias tests remain enabled.', '',
+              'Validation: this workflow must pass JVM tests and both module builds before pushing source changes. The final commit is rebuilt for release. This is not a claim of on-device Wallet, Strong Integrity, RKP or Android 17 validation. Concurrent same-alias replacement and late cache repopulation are not fully solved by these upstream patches; APP-domain UID cache indexing retains existing limitations. APEX/VINTF parsing is not certified equivalent to libvintf. No new hardware-backed security is created.', '', '---', '',
+          ])
+          p = Path('module/changelog.md')
+          s = p.read_text()
+          anchor = '## TEESimulator-RS v6.0.1 - Crypto audit corrections'
+          assert s.count(anchor) == 1
+          p.write_text(s.replace(anchor, notes + anchor, 1))
+          p = Path('README.md')
+          s = p.read_text()
+          for old, new in (
+              ('https://github.com/Enginex0/TEESimulator-RS/actions/workflows/build.yml', 'https://github.com/wfire06100/TEESimulator-RS/actions/workflows/build.yml'),
+              ('https://github.com/Enginex0/TEESimulator-RS/releases', 'https://github.com/wfire06100/TEESimulator-RS/releases'),
+              ('git clone --recursive https://github.com/Enginex0/TEESimulator-RS.git', 'git clone --recursive https://github.com/wfire06100/TEESimulator-RS.git'),
+              ('NDK 29', 'NDK 27.3.13750724'),
+          ):
+              assert old in s
+              s = s.replace(old, new)
+          assert s.count('## What it does\n') == 1
+          p.write_text(s.replace('## What it does\n', notes.replace('## TEESimulator-RS v6.0.1 - Five-PR consolidation', '## Five-PR integration review') + '## What it does\n', 1))
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - run: command -v cargo-ndk || cargo install cargo-ndk
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test and build before source push
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:testDebugUnitTest zipRelease zipDebug -Dorg.gradle.jvmargs=-Xmx2048m
+      - name: Commit only verified sources and descriptions
+        run: |
+          git restore module/update.json
+          git add app/src/main/java/org/matrix/TEESimulator/attestation/KeyMintAttestation.kt app/src/main/java/org/matrix/TEESimulator/interception/keystore/shim/KeyMintSecurityLevelInterceptor.kt app/src/main/java/org/matrix/TEESimulator/util/AndroidDeviceUtils.kt app/src/main/java/org/matrix/TEESimulator/interception/keystore/Keystore2MaintenanceInterceptor.kt app/src/main/java/org/matrix/TEESimulator/interception/keystore/InterceptorUtils.kt stub/src/main/java/android/hardware/security/keymint/Algorithm.java stub/src/main/java/android/hardware/security/keymint/Tag.java stub/src/main/java/android/hardware/security/keymint/KeyParameterValue.java app/src/test/java/org/matrix/TEESimulator/util/VintfInstanceTest.kt README.md module/changelog.md
+          git diff --cached --check
+          if git diff --cached --name-only | grep -q '^.github/'; then exit 1; fi
+          git commit -m 'fix: consolidate five reviewed PRs while preserving crypto audit'
+          git push origin HEAD:main
+      - name: Build final source commit and publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run build.yml --ref main
