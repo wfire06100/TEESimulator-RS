@@ -3,6 +3,17 @@
 
 ---
 
+## TEESimulator-RS v6.0.1 - Five-PR consolidation
+
+- Already present and retained: #68 libcore_bundle.so Binder lookup, #63 RSA/ECB mapping, #47 existing vendor secure-boot aliases and LF script packaging.
+- Integrates pinned #73: Android 17/KeyMint v5 mapping, separate TEE/StrongBox VINTF instances, APEX manifests, ML-DSA parameter tolerance and hardware forwarding of unsupported algorithms/curves. Retains the existing SDK-37 OS mapping and v6.0.1 version scheme; omits speculative future-SDK arithmetic.
+- Integrates pinned #77: clearNamespace purges generated-key, TEE-response and patched-chain caches for the UID. Local adaptation defers clearNamespace cleanup until the real call succeeds and validates the APP namespace range.
+- Retains the crypto/persistence audit and four-ABI fork-local packaging. Corrects residual UNSUPPORTED_KEY_SIZE message mapping to -6; INCOMPATIBLE_PURPOSE remains -3.
+- Adds VINTF instance-isolation JVM tests. Baseline RSA, MAC-length and boot-alias tests remain enabled.
+
+Validation: this workflow must pass JVM tests and both module builds before pushing source changes. The final commit is rebuilt for release. This is not a claim of on-device Wallet, Strong Integrity, RKP or Android 17 validation. Concurrent same-alias replacement and late cache repopulation are not fully solved by these upstream patches; APP-domain UID cache indexing retains existing limitations. APEX/VINTF parsing is not certified equivalent to libvintf. No new hardware-backed security is created.
+
+---
 ## TEESimulator-RS v6.0.1 - Crypto audit corrections
 
 - OAEP: use SHA-1 for omitted MGF1 selection consistently with authorization.

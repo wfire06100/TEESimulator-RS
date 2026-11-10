@@ -2,7 +2,7 @@
   <h1 align="center">TEESimulator-RS</h1>
   <p align="center"><b>Pass hardware security checks on a rooted Android phone</b></p>
   <p align="center">
-    <a href="https://github.com/Enginex0/TEESimulator-RS/actions/workflows/build.yml"><img src="https://github.com/Enginex0/TEESimulator-RS/actions/workflows/build.yml/badge.svg" alt="Build"></a>
+    <a href="https://github.com/wfire06100/TEESimulator-RS/actions/workflows/build.yml"><img src="https://github.com/wfire06100/TEESimulator-RS/actions/workflows/build.yml/badge.svg" alt="Build"></a>
     <img src="https://img.shields.io/badge/Android-10%2B-green?logo=android" alt="Android 10+">
     <a href="https://t.me/superpowers9"><img src="https://img.shields.io/badge/Telegram-community-blue?logo=telegram" alt="Telegram"></a>
   </p>
@@ -13,6 +13,17 @@
 > [!NOTE]
 > This is a fork of [JingMatrix/TEESimulator](https://github.com/JingMatrix/TEESimulator). It adds certificate generation written in Rust, generated keys that survive reboots, and attestation behavior that matches stock Android. See the upstream repo for the original project.
 
+## Five-PR integration review
+
+- Already present and retained: #68 libcore_bundle.so Binder lookup, #63 RSA/ECB mapping, #47 existing vendor secure-boot aliases and LF script packaging.
+- Integrates pinned #73: Android 17/KeyMint v5 mapping, separate TEE/StrongBox VINTF instances, APEX manifests, ML-DSA parameter tolerance and hardware forwarding of unsupported algorithms/curves. Retains the existing SDK-37 OS mapping and v6.0.1 version scheme; omits speculative future-SDK arithmetic.
+- Integrates pinned #77: clearNamespace purges generated-key, TEE-response and patched-chain caches for the UID. Local adaptation defers clearNamespace cleanup until the real call succeeds and validates the APP namespace range.
+- Retains the crypto/persistence audit and four-ABI fork-local packaging. Corrects residual UNSUPPORTED_KEY_SIZE message mapping to -6; INCOMPATIBLE_PURPOSE remains -3.
+- Adds VINTF instance-isolation JVM tests. Baseline RSA, MAC-length and boot-alias tests remain enabled.
+
+Validation: this workflow must pass JVM tests and both module builds before pushing source changes. The final commit is rebuilt for release. This is not a claim of on-device Wallet, Strong Integrity, RKP or Android 17 validation. Concurrent same-alias replacement and late cache repopulation are not fully solved by these upstream patches; APP-domain UID cache indexing retains existing limitations. APEX/VINTF parsing is not certified equivalent to libvintf. No new hardware-backed security is created.
+
+---
 ## What it does
 
 Some Android apps refuse to run on a rooted phone. They ask the phone to prove it still has a genuine security chip, a check called hardware attestation. A rooted phone normally fails that check.
@@ -32,7 +43,7 @@ It replaces TrickyStore and its forks completely. It reads config from the same 
 
 ## Quick start
 
-1. Download the latest ZIP from [Releases](https://github.com/Enginex0/TEESimulator-RS/releases).
+1. Download the latest ZIP from [Releases](https://github.com/wfire06100/TEESimulator-RS/releases).
 2. Install it with your root manager, then reboot.
 3. Put your `keybox.xml` at `/data/adb/tricky_store/keybox.xml`.
 4. List the apps you want to cover in `/data/adb/tricky_store/target.txt`.
@@ -134,10 +145,10 @@ On devices where hardware attestation probes cause camera instability, create an
 
 ## Building from source
 
-You need JDK 21, the Android SDK and NDK 29, Rust (stable) with the `aarch64-linux-android` target, and `cargo-ndk`.
+You need JDK 21, the Android SDK and NDK 27.3.13750724, Rust (stable) with the `aarch64-linux-android` target, and `cargo-ndk`.
 
 ```bash
-git clone --recursive https://github.com/Enginex0/TEESimulator-RS.git
+git clone --recursive https://github.com/wfire06100/TEESimulator-RS.git
 cd TEESimulator-RS
 ./gradlew zipRelease zipDebug
 ```

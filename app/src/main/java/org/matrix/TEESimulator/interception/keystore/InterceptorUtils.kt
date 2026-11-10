@@ -33,7 +33,7 @@ object InterceptorUtils {
             6 -> "Error::Rc(VALUE_CORRUPTED)"
             7 -> "Error::Rc(KEY_NOT_FOUND)"
             10 -> "Error::Rc(BACKEND_BUSY)"
-            -3 -> "Error::Km(UNSUPPORTED_KEY_SIZE)"
+            -6 -> "Error::Km(UNSUPPORTED_KEY_SIZE)"
             -3 -> "Error::Km(INCOMPATIBLE_PURPOSE)"
             -5 -> "Error::Km(INCOMPATIBLE_ALGORITHM)"
             -31 -> "Error::Km(TOO_MANY_OPERATIONS)"

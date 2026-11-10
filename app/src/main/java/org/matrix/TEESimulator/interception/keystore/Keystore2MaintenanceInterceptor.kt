@@ -12,7 +12,8 @@ import org.matrix.TEESimulator.interception.keystore.shim.KeyMintSecurityLevelIn
  * Intercepts the keystore2 daemon's `android.security.maintenance` binder so our synthetic key
  * state follows the same lifecycle events the platform applies to real keys.
  *
- * This is a pure side-effect hook: every handled transaction mutates only our own synthetic state
+ * clearNamespace is mirrored only after the real call succeeds. Other maintenance
+ * operations retain their existing pre-call behavior. This is a side-effect hook: every handled transaction mutates only our own synthetic state
  * and then returns [TransactionResult.ContinueAndSkipPost], so the real keystore2 still performs
  * the real operation. We never fabricate a maintenance reply, so real key lifecycle is never
  * disturbed.
@@ -51,7 +52,7 @@ object Keystore2MaintenanceInterceptor : BinderInterceptor() {
         data: Parcel,
     ): TransactionResult {
         when (code) {
-            CLEAR_NAMESPACE_TRANSACTION -> handleClearNamespace(data)
+            CLEAR_NAMESPACE_TRANSACTION -> return TransactionResult.Continue
             DELETE_ALL_KEYS_TRANSACTION ->
                 KeyMintSecurityLevelInterceptor.clearAllGeneratedKeys("maintenance.deleteAllKeys")
             MIGRATE_KEY_NAMESPACE_TRANSACTION -> handleMigrateKeyNamespace(data, callingUid)
@@ -60,12 +61,35 @@ object Keystore2MaintenanceInterceptor : BinderInterceptor() {
         return TransactionResult.ContinueAndSkipPost
     }
 
+    override fun onPostTransact(
+        txId: Long,
+        target: IBinder,
+        code: Int,
+        flags: Int,
+        callingUid: Int,
+        callingPid: Int,
+        data: Parcel,
+        reply: Parcel?,
+        resultCode: Int,
+    ): TransactionResult {
+        if (code != CLEAR_NAMESPACE_TRANSACTION || resultCode != 0 || reply == null) {
+            return TransactionResult.SkipTransaction
+        }
+        val position = reply.dataPosition()
+        try {
+            if (!InterceptorUtils.hasException(reply)) handleClearNamespace(data)
+        } finally {
+            reply.setDataPosition(position)
+        }
+        return TransactionResult.SkipTransaction
+    }
+
     private fun handleClearNamespace(data: Parcel) {
         data.enforceInterface(IKeystoreMaintenance.DESCRIPTOR)
         val domain = data.readInt()
         val nspace = data.readLong()
         // Only Domain.APP namespaces map to our per-uid synthetic keys; nspace is the app uid.
-        if (domain == Domain.APP) {
+        if (domain == Domain.APP && nspace >= 0 && nspace <= Int.MAX_VALUE.toLong()) {
             KeyMintSecurityLevelInterceptor.clearNamespaceKeys(nspace.toInt())
         }
     }
