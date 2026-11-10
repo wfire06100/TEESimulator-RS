@@ -457,7 +457,7 @@ class KeyMintSecurityLevelInterceptor(
                             padding = parsedParams.padding.ifEmpty { keyParams.padding },
                             rsaOaepMgfDigest =
                                 parsedParams.rsaOaepMgfDigest.ifEmpty {
-                                    keyParams.rsaOaepMgfDigest
+                                    listOf(Digest.SHA1)
                                 },
                             nonce = parsedParams.nonce,
                             minMacLength = parsedParams.minMacLength ?: keyParams.minMacLength,
@@ -483,7 +483,7 @@ class KeyMintSecurityLevelInterceptor(
                 if (keyParams?.usageCountLimit != null) {
                     val limit = keyParams.usageCountLimit
                     val remaining =
-                        usageCounters.getOrPut(resolvedKeyId) {
+                        usageCounters.computeIfAbsent(resolvedKeyId) {
                             java.util.concurrent.atomic.AtomicInteger(limit)
                         }
                     if (remaining.get() <= 0) {
@@ -493,13 +493,16 @@ class KeyMintSecurityLevelInterceptor(
                             RESPONSE_KEY_NOT_FOUND
                         )
                     }
-                    softwareOperation.onFinishCallback = {
-                        if (remaining.decrementAndGet() <= 0) {
-                            cleanupKeyData(resolvedKeyId)
-                            usageCounters.remove(resolvedKeyId)
-                            SystemLogger.info(
-                                "Key $resolvedKeyId exhausted (USAGE_COUNT_LIMIT=$limit)."
-                            )
+                    softwareOperation.finishGuard = { action ->
+                        synchronized(remaining) {
+                            if (remaining.get() <= 0) {
+                                throw android.os.ServiceSpecificException(RESPONSE_KEY_NOT_FOUND)
+                            }
+                            val result = action()
+                            remaining.decrementAndGet()
+                            // Keep the exhausted budget attached until the next create/delete.
+                            // Never let an old operation delete a replacement key at this alias.
+                            result
                         }
                     }
                 }
@@ -859,7 +862,7 @@ class KeyMintSecurityLevelInterceptor(
                         }
                     }
                     .getOrNull()
-            persistExecutor.execute {
+            run {
                 GeneratedKeyPersistence.save(
                     keyId = keyId,
                     keyPair = null,
@@ -984,7 +987,7 @@ class KeyMintSecurityLevelInterceptor(
                     }
                     .getOrNull()
             }
-        persistExecutor.execute {
+        run {
             GeneratedKeyPersistence.save(
                 keyId = keyId,
                 keyPair = keyData.first,
@@ -1502,7 +1505,7 @@ class KeyMintSecurityLevelInterceptor(
         private const val STRONGBOX_KEYGEN_LATENCY_FLOOR_MS = 250L
         private const val STRONGBOX_OP_LATENCY_FLOOR_MS = 80L
         private const val TEE_OP_LATENCY_FLOOR_MS = 4L
-        private const val KEYMINT_TOO_MANY_OPERATIONS = -29
+        private const val KEYMINT_TOO_MANY_OPERATIONS = -31
         private const val KEYMINT_CANNOT_ATTEST_IDS = -66
         private const val KEYMINT_UNKNOWN_ERROR = -1000
         private const val SECURE_HW_COMMUNICATION_FAILED = -49

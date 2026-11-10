@@ -34,12 +34,12 @@ object InterceptorUtils {
             7 -> "Error::Rc(KEY_NOT_FOUND)"
             10 -> "Error::Rc(BACKEND_BUSY)"
             -3 -> "Error::Km(UNSUPPORTED_KEY_SIZE)"
-            -6 -> "Error::Km(INCOMPATIBLE_PURPOSE)"
-            -7 -> "Error::Km(INCOMPATIBLE_ALGORITHM)"
-            -29 -> "Error::Km(TOO_MANY_OPERATIONS)"
-            -49 -> "Error::Km(UNSUPPORTED_TAG)"
-            -75 -> "Error::Km(INVALID_INPUT_LENGTH)"
-            -76 -> "Error::Km(INVALID_TAG)"
+            -3 -> "Error::Km(INCOMPATIBLE_PURPOSE)"
+            -5 -> "Error::Km(INCOMPATIBLE_ALGORITHM)"
+            -31 -> "Error::Km(TOO_MANY_OPERATIONS)"
+            -39 -> "Error::Km(UNSUPPORTED_TAG)"
+            -21 -> "Error::Km(INVALID_INPUT_LENGTH)"
+            -40 -> "Error::Km(INVALID_TAG)"
             else -> if (errorCode > 0) "Error::Rc($errorCode)" else "Error::Km($errorCode)"
         }
 

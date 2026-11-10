@@ -72,6 +72,7 @@ object GeneratedKeyPersistence {
         return fileLocks.computeIfAbsent(filename) { ReentrantLock() }
     }
 
+    @Synchronized
     fun save(
         keyId: KeyIdentifier,
         keyPair: KeyPair?,
@@ -97,7 +98,8 @@ object GeneratedKeyPersistence {
         try {
             SystemLogger.debug("[Persistence] Lock acquired for $filename")
             runCatching {
-                    PERSISTENCE_DIR.mkdirs()
+                    check(PERSISTENCE_DIR.isDirectory || PERSISTENCE_DIR.mkdirs())
+                    android.system.Os.chmod(PERSISTENCE_DIR.absolutePath, 448)
                     val finalFile = File(PERSISTENCE_DIR, filename)
                     val tmpFile = File(PERSISTENCE_DIR, "$filename.tmp")
 
@@ -156,6 +158,8 @@ object GeneratedKeyPersistence {
 
                     // Atomic rename — if this fails the tmp is left behind and cleaned on next
                     // deleteAll
+                    android.system.Os.chmod(tmpFile.absolutePath, 384)
+                    FileOutputStream(tmpFile, true).use { it.fd.sync() }
                     if (!tmpFile.renameTo(finalFile)) {
                         tmpFile.delete()
                         throw IllegalStateException(
@@ -170,13 +174,14 @@ object GeneratedKeyPersistence {
 
                     SystemLogger.debug("Persisted key: $keyId")
                 }
-                .onFailure { e -> SystemLogger.error("Failed to persist key $keyId", e) }
+                .onFailure { e -> SystemLogger.error("Failed to persist key $keyId", e); throw e }
         } finally {
             lock.unlock()
             SystemLogger.debug("[Persistence] Lock released for $filename")
         }
     }
 
+    @Synchronized
     fun delete(keyId: KeyIdentifier) {
         runCatching {
                 val file = File(PERSISTENCE_DIR, keyFileName(keyId.uid, keyId.alias))
@@ -185,15 +190,16 @@ object GeneratedKeyPersistence {
                         fileLocks.remove(keyFileName(keyId.uid, keyId.alias))
                         SystemLogger.debug("Deleted persisted key: $keyId")
                     } else {
-                        SystemLogger.warning("Failed to delete persisted key file: ${file.name}")
+                        throw IOException("Failed to delete persisted key file: ${file.name}")
                     }
                 } else {
                     SystemLogger.debug("No persisted file to delete for: $keyId")
                 }
             }
-            .onFailure { e -> SystemLogger.error("Failed to delete persisted key $keyId", e) }
+            .onFailure { e -> SystemLogger.error("Failed to delete persisted key $keyId", e); throw e }
     }
 
+    @Synchronized
     fun deleteAll() {
         runCatching {
                 if (!PERSISTENCE_DIR.exists()) {
@@ -208,15 +214,16 @@ object GeneratedKeyPersistence {
                 var count = 0
                 files.forEach { file ->
                     if (file.name.endsWith(".bin") || file.name.endsWith(".tmp")) {
-                        if (file.delete()) count++
+                        if (file.delete()) count++ else throw IOException("Failed to delete ${file.name}")
                     }
                 }
                 fileLocks.clear()
                 SystemLogger.info("Deleted $count persisted key files")
             }
-            .onFailure { e -> SystemLogger.error("Failed to delete all persisted keys", e) }
+            .onFailure { e -> SystemLogger.error("Failed to delete all persisted keys", e); throw e }
     }
 
+    @Synchronized
     fun loadAll(securityLevel: Int): List<PersistedKeyData> {
         if (!PERSISTENCE_DIR.exists()) {
             SystemLogger.debug("No persistent_keys directory, nothing to load")
@@ -327,6 +334,7 @@ object GeneratedKeyPersistence {
     // reconstructing authorization parameters from the response. This avoids
     // pulling keymint Tag dependencies into this file and is correct because
     // the only field that changes post-generation is the patched cert chain.
+    @Synchronized
     fun rePersistIfNeeded(
         callingUid: Int,
         generatedKeyInfo: KeyMintSecurityLevelInterceptor.GeneratedKeyInfo,

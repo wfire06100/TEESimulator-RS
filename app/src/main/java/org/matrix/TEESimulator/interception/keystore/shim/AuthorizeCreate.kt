@@ -82,14 +82,10 @@ object AuthorizeCreate {
             return INCOMPATIBLE_MGF_DIGEST
         }
 
-        if (keyParams.algorithm == Algorithm.AES && opParams.blockMode.contains(BlockMode.GCM)) {
-            val requestedMacLength = opParams.minMacLength
-            val keyMinMacLength = keyParams.minMacLength
-            if (
-                requestedMacLength != null &&
-                    keyMinMacLength != null &&
-                    requestedMacLength < keyMinMacLength
-            ) {
+        if (keyParams.algorithm == Algorithm.AES &&
+            (opParams.blockMode.firstOrNull() ?: keyParams.blockMode.firstOrNull()) == BlockMode.GCM) {
+            val bits = opParams.macLength ?: return -53
+            if (!CryptoMacLengths.valid(bits, maxOf(96, keyParams.minMacLength ?: 96), 128)) {
                 return KeystoreErrorCodes.invalidMacLength
             }
         }

@@ -3,6 +3,21 @@
 
 ---
 
+## TEESimulator-RS v6.0.1 - Crypto audit corrections
+
+- OAEP: use SHA-1 for omitted MGF1 selection consistently with authorization.
+- GCM: validate and apply the requested tag length and nonce length.
+- HMAC: reject empty, non-byte-aligned, undersized and oversized MAC requests.
+- Signatures: map SHA-1/SHA-224 explicitly; reject unsupported digest substitutions.
+- Operations: invalidate failed finalizations, serialize software methods, enforce shared usage budgets at finalization.
+- Errors: correct KeyMint fallback values and distinguish GCM authentication failures.
+- Persistence: serialize reads/writes/deletions, synchronize file data before rename, restrict new key files to owner access, propagate failures and save synchronously.
+- Packaging: point updates/changelog at this fork, build Rust for all four advertised ABIs, run JVM tests before packaging, extract only the latest changelog section.
+
+Validation: this change adds MAC-length unit tests and runs JVM tests in CI. Compilation results must be checked in Actions. Android integration, concurrency, reboot durability and provider-specific behavior remain to be validated on devices. The storage remains software-backed; owner-only file permissions are not hardware isolation or encrypted key wrapping. An exhausted key budget remains attached to the key until its next operation request or deletion. No claim is made about removing Chunqiu detection.
+
+---
+
 ## TEESimulator-RS v6.0.1-307
 
 Fixes five gaps in the module's TEE key-operation and attestation emulation. Two of them fix crashes in real app crypto on a broken-TEE device: any app using an AndroidKeyStore HMAC key or an RSA-OAEP-SHA256 key was throwing. This is a beta; the confirmation logs are in the debug build only, and nothing is field-verified yet.

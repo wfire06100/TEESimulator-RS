@@ -70,10 +70,13 @@ internal object JcaAlgorithmMapper {
     fun mapSignatureAlgorithm(params: KeyMintAttestation): String {
         val digest =
             when (params.digest.firstOrNull()) {
+                Digest.NONE -> "NONE"
+                Digest.SHA1 -> "SHA1"
+                Digest.SHA_2_224 -> "SHA224"
                 Digest.SHA_2_256 -> "SHA256"
                 Digest.SHA_2_384 -> "SHA384"
                 Digest.SHA_2_512 -> "SHA512"
-                else -> "NONE"
+                else -> throw ServiceSpecificException(KeystoreErrorCodes.incompatibleDigest)
             }
         return when (params.algorithm) {
             Algorithm.EC -> "${digest}withECDSA"
@@ -138,15 +141,17 @@ internal object JcaAlgorithmMapper {
             Digest.SHA_2_256 -> "SHA-256"
             Digest.SHA_2_384 -> "SHA-384"
             Digest.SHA_2_512 -> "SHA-512"
-            else -> "SHA-256"
+            else -> throw ServiceSpecificException(KeystoreErrorCodes.incompatibleDigest)
         }
 
     fun mapMacAlgorithm(params: KeyMintAttestation): String =
         when (params.digest.firstOrNull()) {
+            Digest.SHA1 -> "HmacSHA1"
+            Digest.SHA_2_224 -> "HmacSHA224"
             Digest.SHA_2_256 -> "HmacSHA256"
             Digest.SHA_2_384 -> "HmacSHA384"
             Digest.SHA_2_512 -> "HmacSHA512"
-            else -> "HmacSHA256"
+            else -> throw ServiceSpecificException(KeystoreErrorCodes.incompatibleDigest)
         }
 }
 
@@ -210,8 +215,16 @@ private class CipherPrimitive(
     private val cipher: Cipher =
         Cipher.getInstance(JcaAlgorithmMapper.mapCipherAlgorithm(params)).apply {
             val nonce = params.nonce
-            if (nonce != null && isAead) {
-                init(opMode, cryptoKey, javax.crypto.spec.GCMParameterSpec(128, nonce))
+            if (isAead) {
+                val bits = params.macLength ?: throw ServiceSpecificException(-53)
+                if (!CryptoMacLengths.valid(bits, maxOf(96, params.minMacLength ?: 96), 128)) {
+                    throw ServiceSpecificException(KeystoreErrorCodes.invalidMacLength)
+                }
+                val iv = nonce ?: if (opMode == Cipher.ENCRYPT_MODE) {
+                    ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
+                } else throw ServiceSpecificException(-51)
+                if (iv.size != 12) throw ServiceSpecificException(-52)
+                init(opMode, cryptoKey, javax.crypto.spec.GCMParameterSpec(bits, iv))
             } else if (nonce != null) {
                 init(opMode, cryptoKey, javax.crypto.spec.IvParameterSpec(nonce))
             } else if (params.padding.firstOrNull() == PaddingMode.RSA_OAEP) {
@@ -219,7 +232,7 @@ private class CipherPrimitive(
                 val mgfDigest =
                     params.rsaOaepMgfDigest.firstOrNull()?.let {
                         JcaAlgorithmMapper.mapOaepDigest(it)
-                    } ?: mainDigest
+                    } ?: "SHA-1"
                 init(
                     opMode,
                     cryptoKey,
@@ -310,8 +323,11 @@ private class MacPrimitive(
         val full = mac.doFinal()
         // Tag.MAC_LENGTH is optional on the AndroidKeyStore Mac SPI; default to the
         // full digest length so real Mac use keeps working when it is omitted.
-        val tagBytes = (params.macLength ?: (full.size * 8)) / 8
-        val tag = full.copyOf(tagBytes)
+        val bits = params.macLength ?: (full.size * 8)
+        if (!CryptoMacLengths.valid(bits, params.minMacLength ?: 64, full.size * 8)) {
+            throw ServiceSpecificException(KeystoreErrorCodes.invalidMacLength)
+        }
+        val tag = full.copyOf(bits / 8)
         if (params.purpose.firstOrNull() == KeyPurpose.VERIFY) {
             if (signature == null) {
                 throw ServiceSpecificException(
@@ -350,6 +366,7 @@ class SoftwareOperation(
         private set
 
     var onFinishCallback: (() -> Unit)? = null
+    internal var finishGuard: ((() -> ByteArray?) -> ByteArray?)? = null
 
     val beginParameters: KeyParameters?
         get() {
@@ -475,6 +492,7 @@ class SoftwareOperation(
         }
     }
 
+    @Synchronized
     fun updateAad(aadInput: ByteArray?) {
         SystemLogger.info(
             "[SoftwareOp TX_ID: $txId] updateAad() ENTRY inputSize=${aadInput?.size ?: 0} primitive=${primitive::class.simpleName}"
@@ -496,6 +514,7 @@ class SoftwareOperation(
         }
     }
 
+    @Synchronized
     fun update(data: ByteArray?): ByteArray? {
         SystemLogger.debug("[SoftwareOp TX_ID: $txId] update() inputSize=${data?.size ?: 0}")
         checkActive()
@@ -510,12 +529,15 @@ class SoftwareOperation(
         }
     }
 
+    @Synchronized
     fun finish(data: ByteArray?, signature: ByteArray?): ByteArray? {
         checkActive()
-        checkInputLength(data)
         try {
+            checkInputLength(data)
             val startNs = if (latencyFloorMs > 0) System.nanoTime() else 0L
-            val result = primitive.finish(data, signature)
+            val action = { primitive.finish(data, signature) }
+            val guard = finishGuard
+            val result = if (guard == null) action() else guard(action)
             if (latencyFloorMs > 0) {
                 val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
                 val delayMs = latencyFloorMs - elapsedMs
@@ -530,9 +552,12 @@ class SoftwareOperation(
         } catch (e: Exception) {
             SystemLogger.error("[SoftwareOp TX_ID: $txId] Failed to finish operation.", e)
             throw mapToServiceSpecificException(e)
+        } finally {
+            finalized = true
         }
     }
 
+    @Synchronized
     fun abort() {
         finalized = true
         primitive.abort()
@@ -542,6 +567,8 @@ class SoftwareOperation(
     private fun mapToServiceSpecificException(e: Exception): ServiceSpecificException =
         when (e) {
             is SignatureException ->
+                ServiceSpecificException(KeystoreErrorCodes.verificationFailed, e.message)
+            is javax.crypto.AEADBadTagException ->
                 ServiceSpecificException(KeystoreErrorCodes.verificationFailed, e.message)
             is javax.crypto.BadPaddingException ->
                 ServiceSpecificException(KeystoreErrorCodes.invalidArgument, e.message)
@@ -567,7 +594,7 @@ internal object KeystoreErrorCodes {
     }
 
     val invalidTag: Int by lazy {
-        resolveField("android.hardware.security.keymint.ErrorCode", "INVALID_TAG", -76)
+        resolveField("android.hardware.security.keymint.ErrorCode", "INVALID_TAG", -40)
     }
 
     val verificationFailed: Int by lazy {
@@ -583,27 +610,27 @@ internal object KeystoreErrorCodes {
     }
 
     val incompatibleKey: Int by lazy {
-        resolveField("android.hardware.security.keymint.ErrorCode", "INCOMPATIBLE_KEY", -31)
+        resolveField("android.hardware.security.keymint.ErrorCode", "INVALID_KEY_BLOB", -33)
     }
 
     val incompatiblePurpose: Int by lazy {
-        resolveField("android.hardware.security.keymint.ErrorCode", "INCOMPATIBLE_PURPOSE", -13)
+        resolveField("android.hardware.security.keymint.ErrorCode", "INCOMPATIBLE_PURPOSE", -3)
     }
 
     val unsupportedPurpose: Int by lazy {
-        resolveField("android.hardware.security.keymint.ErrorCode", "UNSUPPORTED_PURPOSE", -14)
+        resolveField("android.hardware.security.keymint.ErrorCode", "UNSUPPORTED_PURPOSE", -2)
     }
 
     val incompatibleAlgorithm: Int by lazy {
-        resolveField("android.hardware.security.keymint.ErrorCode", "INCOMPATIBLE_ALGORITHM", -18)
+        resolveField("android.hardware.security.keymint.ErrorCode", "INCOMPATIBLE_ALGORITHM", -5)
     }
 
     val keyNotYetValid: Int by lazy {
-        resolveField("android.hardware.security.keymint.ErrorCode", "KEY_NOT_YET_VALID", -39)
+        resolveField("android.hardware.security.keymint.ErrorCode", "KEY_NOT_YET_VALID", -24)
     }
 
     val keyExpired: Int by lazy {
-        resolveField("android.hardware.security.keymint.ErrorCode", "KEY_EXPIRED", -40)
+        resolveField("android.hardware.security.keymint.ErrorCode", "KEY_EXPIRED", -25)
     }
 
     val callerNonceProhibited: Int by lazy {

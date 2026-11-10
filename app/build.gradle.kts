@@ -96,6 +96,12 @@ val buildRustCertgen by
             "ndk",
             "-t",
             "arm64-v8a",
+            "-t",
+            "armeabi-v7a",
+            "-t",
+            "x86",
+            "-t",
+            "x86_64",
             "-o",
             rootProject.projectDir.resolve("app/src/main/jniLibs").absolutePath,
             "build",
@@ -142,8 +148,8 @@ val refreshUpdateJson by
                 """{
   "version": "$fullVer",
   "versionCode": $capturedCount,
-  "zipUrl": "https://github.com/Enginex0/TEESimulator-RS/releases/download/$fullVer/TEESimulator-RS-$fullVer-Release.zip",
-  "changelog": "https://raw.githubusercontent.com/Enginex0/TEESimulator-RS/main/module/changelog.md"
+  "zipUrl": "https://github.com/wfire06100/TEESimulator-RS/releases/download/$fullVer/TEESimulator-RS-$fullVer-Release.zip",
+  "changelog": "https://raw.githubusercontent.com/wfire06100/TEESimulator-RS/main/module/changelog.md"
 }
 """
             )
