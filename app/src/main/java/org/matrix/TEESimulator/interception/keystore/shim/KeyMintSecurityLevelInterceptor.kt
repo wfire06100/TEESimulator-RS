@@ -400,6 +400,9 @@ class KeyMintSecurityLevelInterceptor(
                     }
                 val generatedKeyInfo = resolvedEntry.value
                 val resolvedKeyId = resolvedEntry.key
+                if (AttestationKeyboxProvenance.isRetired(resolvedKeyId, generatedKeyInfo)) {
+                    return InterceptorUtils.createServiceSpecificErrorReply(RESPONSE_KEY_NOT_FOUND)
+                }
 
                 trackAndEnforceOpLimit(callingUid, txId)?.let {
                     return it
@@ -929,6 +932,16 @@ class KeyMintSecurityLevelInterceptor(
             )
         }
 
+        if (attestKeyAlias != null) {
+            val signerId = if (attestationKey?.domain == Domain.GRANT) {
+                resolveGrant(attestationKey.nspace, callingUid)?.ownerKeyId
+            } else KeyIdentifier(callingUid, attestKeyAlias)
+            val signer = signerId?.let { generatedKeys[it] }
+            if (signerId != null && signer != null) {
+                AttestationKeyboxProvenance.requireCurrentSigner(signerId, signer)
+            }
+        }
+
         var forgePath = "FORGE-bouncycastle"
         val keyData =
             if (NativeCertGen.isAvailable && attestationKey == null) {
@@ -977,6 +990,7 @@ class KeyMintSecurityLevelInterceptor(
         }
 
         val certChainCopy = keyData.second.toList()
+        AttestationKeyboxProvenance.remember(keyId, keyDescriptor.nspace, certChainCopy)
         // Snapshot the freshly built KeyMetadata bytes so loadPersistedKeys
         // can restore byte-identical authorizations after reboot. Without
         // this, the rebuild path drops every authorization tag that wasn't
@@ -1347,6 +1361,9 @@ class KeyMintSecurityLevelInterceptor(
                             },
                         )
                     if (record.isAttestationKey) attestationKeys.add(keyIdRestored)
+                    generatedKeys[keyIdRestored]?.let {
+                        AttestationKeyboxProvenance.reportRestored(keyIdRestored, it)
+                    }
 
                     SystemLogger.debug("Restored persisted key: $keyIdRestored")
                 }
@@ -1632,14 +1649,21 @@ class KeyMintSecurityLevelInterceptor(
                 .forEach { softwareGrants.remove(it.key) }
         }
 
-        fun getGeneratedKeyResponse(keyId: KeyIdentifier): KeyEntryResponse? =
-            generatedKeys[keyId]?.response ?: teeResponses[keyId]
+        fun getGeneratedKeyResponse(keyId: KeyIdentifier): KeyEntryResponse? {
+            val generated = generatedKeys[keyId]
+            if (generated != null) {
+                return if (AttestationKeyboxProvenance.isRetired(keyId, generated)) null
+                    else generated.response
+            }
+            return teeResponses[keyId]
+        }
 
         fun findGeneratedKeyByKeyId(callingUid: Int, nspace: Long?): GeneratedKeyInfo? {
             if (nspace == null || nspace == 0L) return null
             return generatedKeys.entries
                 .filter { (keyIdentifier, _) -> keyIdentifier.uid == callingUid }
                 .find { (_, info) -> info.nspace == nspace }
+                ?.takeUnless { AttestationKeyboxProvenance.isRetired(it.key, it.value) }
                 ?.value
         }
 
@@ -1653,6 +1677,7 @@ class KeyMintSecurityLevelInterceptor(
             if (nspace == null || nspace == 0L) return null
             return generatedKeys.entries
                 .firstOrNull { (keyId, info) -> keyId.uid == callingUid && info.nspace == nspace }
+                ?.takeUnless { AttestationKeyboxProvenance.isRetired(it.key, it.value) }
                 ?.key
                 ?.alias
         }
@@ -1753,11 +1778,22 @@ class KeyMintSecurityLevelInterceptor(
         }
 
         fun invalidatePatchedChains(reason: String? = null) {
-            val count = patchedChains.size
-            if (count == 0) return
+            val snapshots = patchedChains.entries.map { it.key to it.value }
+            for ((id, oldChain) in snapshots) {
+                if (!patchedChains.remove(id, oldChain)) continue
+                teeResponses.computeIfPresent(id) { _, response ->
+                    val served = response.metadata?.let {
+                        CertificateHelper.getCertificateChain(it)
+                    }
+                    val sameChain = served != null && served.size == oldChain.size &&
+                        served.indices.all { index ->
+                            served[index].encoded.contentEquals(oldChain[index].encoded)
+                        }
+                    if (sameChain) null else response
+                }
+            }
             val reasonMessage = reason?.let { " due to $it" } ?: ""
-            patchedChains.clear()
-            SystemLogger.info("Invalidated $count patched cert chains$reasonMessage.")
+            SystemLogger.info("Invalidated ${snapshots.size} patched chain snapshots$reasonMessage.")
         }
 
         fun clearAllGeneratedKeys(reason: String? = null) {
