@@ -150,12 +150,17 @@ object AndroidDeviceUtils {
      */
     @OptIn(ExperimentalStdlibApi::class)
     private fun getProperty(name: String, expectedSize: Int): ByteArray? {
-        val value = SystemProperties.get(name, null)
-        if (value.isNullOrBlank()) {
-            return null
+        SystemProperties.get(name, null)?.let { value ->
+            if (value.length == expectedSize * 2) return value.hexToByteArray()
         }
-        // A valid digest is (2 * size) hex characters.
-        return if (value.length == expectedSize * 2) value.hexToByteArray() else null
+
+        // Fallback: read via root shell. The module's SELinux context can deny direct property
+        // reads even when `getprop` from a root shell returns the live value.
+        return runCatching {
+            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "getprop", name))
+            val value = process.inputStream.bufferedReader().readText().trim()
+            if (value.length == expectedSize * 2) value.hexToByteArray() else null
+        }.getOrNull()
     }
 
     /**
