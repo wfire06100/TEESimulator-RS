@@ -600,7 +600,9 @@ object AndroidDeviceUtils {
                     }
                 }
             }
-            .onFailure { SystemLogger.debug("Unable to scan APEX VINTF dirs: ${throwable.message}") }
+            .onFailure { throwable ->
+                SystemLogger.debug("Unable to scan APEX VINTF dirs: ${throwable.message}")
+            }
 
         return files.values
             .flatMap { file ->
