@@ -56,14 +56,14 @@ object AndroidDeviceUtils {
     }
 
     /**
-     * Lazily initializes and retrieves the verified boot hash (vbmeta digest). The value is sourced
-     * in the following order:
+     * Resolves the verified boot hash (vbmeta digest) on every access. The value is sourced in the
+     * following order:
      * 1. From the `ro.boot.vbmeta.digest` system property.
      * 2. From a cached TEE attestation record.
      * 3. As a randomly generated 32-byte value (fallback).
      */
-    val bootHash: ByteArray by lazy {
-        initializeBootProperty(
+    val bootHash: ByteArray
+        get() = initializeBootProperty(
             propertyName = "ro.boot.vbmeta.digest",
             attestationValueProvider = {
                 DeviceAttestationService.CachedAttestationData?.verifiedBootHash
@@ -71,7 +71,6 @@ object AndroidDeviceUtils {
             expectedSize = 32,
             recordSource = { bootHashSource = it },
         )
-    }
 
     // Records which fallback tier supplied bootKey/bootHash so the diagnostic dossier can flag a
     // random-fallback value — a real verifiedBootKey that resolves to random bytes is a textbook
@@ -162,7 +161,7 @@ object AndroidDeviceUtils {
     /**
      * Sets a system property using the `resetprop` command.
      *
-     * @param name The name of the property to set.
+     * @param name The name of the system property.
      * @param bytes The value to set, which will be converted to a hex string.
      */
     private fun setProperty(name: String, bytes: ByteArray) {
@@ -286,7 +285,7 @@ object AndroidDeviceUtils {
      * 3. Default system patch level from Build.VERSION.SECURITY_PATCH.
      *
      * @param component The component ("system", "vendor", "boot").
-     * @param isLong Whether the final integer should be in YYYYMMDD format.
+     * @param isLong Whether the final integer should be in YYYYMMDD or YYYYMM format.
      * @return The patch level as a guaranteed non-null Integer.
      */
     private fun getRealDevicePatchLevelInt(component: String, isLong: Boolean): Int {
@@ -319,8 +318,8 @@ object AndroidDeviceUtils {
      * Retrieves a custom patch level from the configuration if available for a specific UID.
      *
      * @param uid The UID of the calling application.
-     * @param component The component to get the patch level for ("system", "vendor", "boot").
-     * @param isLong Whether to return the patch level in `YYYYMMDD` or `YYYYMM` format.
+     * @param component The component ("system", "vendor", "boot").
+     * @param isLong Whether the final integer should be in YYYYMMDD or YYYYMM format.
      * @return The custom patch level, or null if not configured.
      */
     private fun getCustomPatchLevelFor(uid: Int, component: String, isLong: Boolean): Int? {
@@ -361,7 +360,6 @@ object AndroidDeviceUtils {
         if (value.equals("today", ignoreCase = true)) {
             return LocalDate.now().toString() // Returns "YYYY-MM-DD" format
         }
-
         // Handle date templates like "YYYY-MM-01" or "2025-MM-DD".
         if (
             value.contains("YYYY", ignoreCase = true) ||
@@ -407,7 +405,7 @@ object AndroidDeviceUtils {
         }
     }
 
-    /** Converts a security patch string (e.g., "2025-11-01") to an integer representation. */
+    /** Converts a security patch string (e.g., "2025-11-01") to an integer format. */
     private fun String.toPatchLevelInt(isLong: Boolean): Int {
         return parsePatchLevelValue(this, isLong) ?: 20240401 // Fallback
     }
@@ -602,7 +600,7 @@ object AndroidDeviceUtils {
                     }
                 }
             }
-            .onFailure { SystemLogger.debug("Unable to scan APEX VINTF dirs: ${it.message}") }
+            .onFailure { SystemLogger.debug("Unable to scan APEX VINTF dirs: ${throwable.message}") }
 
         return files.values
             .flatMap { file ->
