@@ -137,13 +137,29 @@ object AttestationKeyboxProvenance {
             State.UNAVAILABLE
         }
 
-    fun isRetired(id: KeyIdentifier, info: KeyMintSecurityLevelInterceptor.GeneratedKeyInfo): Boolean =
-        runCatching {
-            if (info.secretKey != null) false
-            else chain(info).takeIf { it.isNotEmpty() }?.let {
-                retired(id, binding(info.nspace, it))
-            } ?: false
-        }.getOrDefault(false)
+    /**
+     * In-memory verdicts for the hot read path. Keyed by the live GeneratedKeyInfo instance, so a
+     * regenerated or replaced key misses automatically. Nothing is persisted here: the .retired
+     * sidecars stay the source of truth and the cache is rebuilt lazily after a reboot.
+     */
+    private val retiredVerdicts =
+        java.util.concurrent.ConcurrentHashMap<
+            KeyIdentifier,
+            Pair<java.lang.ref.WeakReference<KeyMintSecurityLevelInterceptor.GeneratedKeyInfo>, Boolean>,
+        >()
+
+    fun isRetired(id: KeyIdentifier, info: KeyMintSecurityLevelInterceptor.GeneratedKeyInfo): Boolean {
+        if (info.secretKey != null) return false
+        retiredVerdicts[id]?.let { (ref, verdict) -> if (ref.get() === info) return verdict }
+        val computed =
+            runCatching {
+                    chain(info).takeIf { it.isNotEmpty() }?.let { retired(id, binding(info.nspace, it)) }
+                        ?: false
+                }
+                .getOrNull() ?: return false
+        retiredVerdicts[id] = java.lang.ref.WeakReference(info) to computed
+        return computed
+    }
 
     fun requireCurrentSigner(id: KeyIdentifier, info: KeyMintSecurityLevelInterceptor.GeneratedKeyInfo) {
         when (state(id, info)) {
@@ -174,6 +190,7 @@ object AttestationKeyboxProvenance {
         if (binding.namespace != namespace || binding.publicKey != publicKeySha256) return false
         if (state(id, info) != State.STALE) return false
         write(id, ".retired") { writeBinding(it, binding) }
+        retiredVerdicts[id] = java.lang.ref.WeakReference(info) to true
         SystemLogger.info("Explicitly retired stale attestation key $id; v3 material retained")
         return true
     }
